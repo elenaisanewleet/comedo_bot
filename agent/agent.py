@@ -25,6 +25,12 @@ import base64
 from typing import Optional, List, Dict, Any
 
 from openai import OpenAI
+import openai as openai_pkg
+import logging
+
+logger = logging.getLogger(__name__)
+logger.info(f"Using openai package version: {getattr(openai_pkg, '__version__', 'unknown')}")
+
 
 # Directory of this file
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
