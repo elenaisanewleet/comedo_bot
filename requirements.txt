@@ -1,4 +1,4 @@
-openai>=1.52.0
+openai==1.52.0
 aiogram>=3.4.1
 httpx>=0.25.0
 python-dotenv>=1.0.0

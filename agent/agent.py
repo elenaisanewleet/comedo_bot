@@ -1,122 +1,440 @@
-"""KomedoBot agent implementation.
+# agent/agent.py
+"""ComedoBot agent implementation (2 steps) + STRICT comedogen flags by code."""
 
-This module provides an asynchronous function `run_agent` which sends a single
-request to the OpenAI Responses API using the web_search tool. The agent reads
-the prompt from ``prompt_system.txt`` and builds the appropriate request payload
-to perform OCR (if an image is provided), search for the product composition on
-the web, analyze the ingredients against a fixed list of comedogens, and вернуть
-СТРОГО структурированный JSON (см. описание в prompt_system.txt).
+from __future__ import annotations
 
-The OpenAI API key is expected to be provided via the ``OPENAI_API_KEY``
-environment variable. If it is not set, the OpenAI library will attempt to
-fallback to other default authentication mechanisms.
-
-Usage:
-
-.. code-block:: python
-
-    from agent.agent import run_agent
-    raw_json = await run_agent(product_name="La Roche-Posay Effaclar Duo")
-    # raw_json — строка с JSON, который потом парсится и форматируется ботом.
-"""
-
-import os
 import base64
-from typing import Optional, List, Dict, Any
-
-from openai import OpenAI
-import openai as openai_pkg
+import json
 import logging
+import os
+import re
+from typing import Any, Dict, List, Optional
+
+import httpx
+import openai as openai_pkg
+from dotenv import load_dotenv
+from openai import AsyncOpenAI
+
+from .comedogen_base import hard_comedogens, conditional_comedogens
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
-logger.info(f"Using openai package version: {getattr(openai_pkg, '__version__', 'unknown')}")
+logger.info("Using openai package version: %s", getattr(openai_pkg, "__version__", "unknown"))
 
-
-# Directory of this file
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Load the system prompt from the text file located in this package
-PROMPT_PATH = os.path.join(BASE_DIR, "prompt_system.txt")
+PROMPT_STEP1_PATH = os.path.join(BASE_DIR, "prompt_system.txt")
+PROMPT_STEP2_PATH = os.path.join(BASE_DIR, "prompt_system_step2.txt")
 
-try:
-    with open(PROMPT_PATH, "r", encoding="utf-8") as f:
-        SYSTEM_PROMPT = f.read()
-except FileNotFoundError as exc:
-    raise RuntimeError(
-        f"System prompt file not found at {PROMPT_PATH!r}. Make sure the file exists."
-    ) from exc
 
-# Initialize the OpenAI client. The API key is read from the environment variable
-# OPENAI_API_KEY. If not set, OpenAI library will try its default configuration.
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+def _read_text(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Prompt file not found at {path!r}.") from exc
 
+
+SYSTEM_PROMPT_STEP1 = _read_text(PROMPT_STEP1_PATH)
+SYSTEM_PROMPT_STEP2 = _read_text(PROMPT_STEP2_PATH)
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY is not set")
+
+# Важно: большой общий таймаут клиента (Step2 может быть долгим), без ретраев.
+client = AsyncOpenAI(
+    api_key=OPENAI_API_KEY,
+    max_retries=0,
+    timeout=httpx.Timeout(300.0, connect=20.0),
+)
+
+# ─────────────────────────────────────────────
+# STRICT matching helpers (by base only)
+# ─────────────────────────────────────────────
+
+_non_alnum = re.compile(r"[^a-z0-9\s-]+")
+_spaces = re.compile(r"\s+")
+
+# Производные кислот — НЕ считаются hard
+# (palmitate / stearate / laurate / myristate / caprate / caprylate и любые комбинации)
+_acid_derivative_pattern = re.compile(
+    r"\b(palmitate|stearate|laurate|myristate|caprate|caprylate)\b",
+    flags=re.I,
+)
+
+
+def _norm(text: str) -> str:
+    text = (text or "").lower()
+    text = _non_alnum.sub(" ", text)
+    text = _spaces.sub(" ", text).strip()
+    return text
+
+
+def _has_word(text: str, word: str) -> bool:
+    return re.search(rf"\b{re.escape(word)}\b", text) is not None
+
+
+def _matches_phrase(term: str, ingredient_norm: str) -> bool:
+    """term can be a single word or phrase."""
+    t = _norm(term)
+    if " " in t:
+        return t in ingredient_norm
+    return _has_word(ingredient_norm, t)
+
+
+def classify_ingredient_strict(name: str, position: int) -> Dict[str, Any]:
+    """
+    STRICT classification (only by your fixed base + special rules from prompt):
+
+    HARD:
+      - any exact hard term match
+      - wax special rule: if 'wax' is in ingredient NAME => hard
+      - acids: ONLY exact "... acid" forms are hard; derivatives are NOT hard
+
+    CONDITIONAL:
+      - exact conditional term match
+      - special partial matches allowed only for: sil / methicone / dimethicone
+    """
+    n = _norm(name)
+
+    # ── HARD: wax special rule (in name)
+    # e.g. beeswax, candelilla wax, carnauba wax => hard
+    if "wax" in n and _has_word(n, "wax"):
+        return {"is_hard": True, "is_conditional": False, "early_conditional": False}
+
+    # ── HARD: strict list (with acid derivative exclusion)
+    for term in hard_comedogens:
+        t = _norm(term)
+
+        # acids: only exact "... acid" entries are allowed as hard;
+        # exclude derivatives like isopropyl palmitate etc.
+        if t in (
+            "palmitic acid",
+            "stearic acid",
+            "lauric acid",
+            "myristic acid",
+            "capric acid",
+            "caprylic acid",
+        ):
+            if _matches_phrase(t, n):
+                return {"is_hard": True, "is_conditional": False, "early_conditional": False}
+            continue
+
+        # if ingredient contains derivative tokens, never treat as hard acids
+        if _acid_derivative_pattern.search(n):
+            # but still allow other hard terms unrelated to acids (e.g. petrolatum)
+            pass
+
+        if _matches_phrase(t, n):
+            # If it matched because of a derivative word (palmitate etc.) — reject.
+            # This prevents "isopropyl palmitate" from being treated as hard.
+            if _acid_derivative_pattern.search(n) and ("acid" in t):
+                continue
+            return {"is_hard": True, "is_conditional": False, "early_conditional": False}
+
+    # ── CONDITIONAL: strict list + partial rules
+    for term, cutoff in conditional_comedogens.items():
+        t = _norm(term)
+
+        # "sil" — match as whole word only (so it doesn't catch "silica")
+        if t == "sil":
+            if _has_word(n, "sil"):
+                return {"is_hard": False, "is_conditional": True, "early_conditional": position <= int(cutoff)}
+            continue
+
+        # "methicone"/"dimethicone" — partial match allowed (per your rules)
+        if t in ("methicone", "dimethicone"):
+            if t in n:
+                return {"is_hard": False, "is_conditional": True, "early_conditional": position <= int(cutoff)}
+            continue
+
+        # others — exact/phrase match
+        if _matches_phrase(t, n):
+            return {"is_hard": False, "is_conditional": True, "early_conditional": position <= int(cutoff)}
+
+    return {"is_hard": False, "is_conditional": False, "early_conditional": False}
+
+
+def apply_comedogenic_flags_strict(ingredients: List[Dict[str, Any]]) -> None:
+    """Mutates ingredients: sets is_hard/is_conditional strictly by the base."""
+    for idx, ing in enumerate(ingredients, start=1):
+        name = ing.get("name") or ""
+        flags = classify_ingredient_strict(name, idx)
+        ing["is_hard"] = bool(flags["is_hard"])
+        ing["is_conditional"] = bool(flags["is_conditional"])
+        # внутренний флаг (не обязателен, но полезен в отладке)
+        ing["_early_conditional"] = bool(flags["early_conditional"])
+
+
+# ─────────────────────────────────────────────
+# Common helpers
+# ─────────────────────────────────────────────
 
 def _encode_image_to_base64(image_bytes: bytes) -> str:
-    """Encode binary image data into a base64 string for embedding in the request."""
     return base64.b64encode(image_bytes).decode("utf-8")
 
 
-async def run_agent(
-    product_name: Optional[str] = None, image_bytes: Optional[bytes] = None
-) -> str:
-    """Analyze a cosmetic product and return a JSON string with structured result.
-
-    This function constructs a single request to the OpenAI Responses API. The
-    agent receives the user-provided product name and/or an image of the product,
-    then, следуя prompt_system.txt:
-
-    1. Пытается определить продукт (в т.ч. по фото, используя OCR).
-    2. Ищет полный INCI состав.
-    3. Анализирует ингредиенты по фиксированным спискам комедогенов.
-    4. Формирует JSON-объект с полями product_name, risk_level, ingredients и т.д.
-
-    Args:
-        product_name: Optional product name supplied by the user.
-        image_bytes: Optional raw bytes of the product photo.
-
-    Returns:
-        JSON string produced by the agent (один объект, без текста вокруг).
-    """
+def _build_user_content(product_name: Optional[str], image_bytes: Optional[bytes]) -> List[Dict[str, Any]]:
     user_content: List[Dict[str, Any]] = []
-
     if product_name:
-        user_content.append(
-            {
-                "type": "input_text",
-                "text": f"Название продукта от пользователя: {product_name}",
-            }
-        )
-
+        user_content.append({"type": "input_text", "text": f"Название продукта от пользователя: {product_name}"})
     if image_bytes:
         b64 = _encode_image_to_base64(image_bytes)
-        user_content.append(
-            {
-                "type": "input_image",
-                "image_url": f"data:image/jpeg;base64,{b64}",
-            }
-        )
-
+        user_content.append({"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"})
     if not user_content:
-        user_content.append(
-            {
-                "type": "input_text",
-                "text": "Данных о продукте нет, скажи, что не можешь выполнить анализ и верни JSON с error.",
-            }
-        )
+        user_content.append({"type": "input_text", "text": "Данных о продукте нет. Верни JSON с error."})
+    return user_content
 
-    response = client.responses.create(
+
+def _safe_json_loads(s: str) -> Optional[Dict[str, Any]]:
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def _strip_bullets(line: str) -> str:
+    line = line.strip()
+    line = re.sub(r"^[-•]\s*", "", line)
+    line = re.sub(r"^\d+[.)]\s*", "", line)
+    return line.strip()
+
+
+def _parse_step2_marked_text_v2(text: str) -> Dict[str, Any]:
+    """
+    Markers:
+
+    SUMMARY:
+    ...
+
+    COMEDOGENS:
+    - Name | pos=4 | type=hard | note=...
+    - ...
+
+    OVERALL:
+    ...
+
+    RECOMMENDATIONS:
+    - ...
+    - ...
+
+    Returns:
+      summary, comedogens_notes(list), overall_notes, recommendations(list)
+    """
+    out: Dict[str, Any] = {
+        "summary": "",
+        "comedogens_notes": [],
+        "overall_notes": "",
+        "recommendations": [],
+    }
+    if not text:
+        return out
+
+    t = text.strip()
+
+    def _block(name: str) -> str:
+        pattern = rf"{name}:\s*(.+?)(?:\n\s*\n(?:SUMMARY|COMEDOGENS|OVERALL|RECOMMENDATIONS):|\Z)"
+        m = re.search(pattern, t, flags=re.S | re.I)
+        return (m.group(1).strip() if m else "").strip()
+
+    out["summary"] = _block("SUMMARY")
+    out["overall_notes"] = _block("OVERALL")
+
+    rec_block = _block("RECOMMENDATIONS")
+    recs: List[str] = []
+    if rec_block:
+        for line in rec_block.splitlines():
+            s = _strip_bullets(line)
+            if s:
+                recs.append(s)
+    out["recommendations"] = recs[:10]
+
+    com_block = _block("COMEDOGENS")
+    notes: List[Dict[str, Any]] = []
+    if com_block:
+        for line in com_block.splitlines():
+            s = _strip_bullets(line)
+            if not s:
+                continue
+
+            parts = [p.strip() for p in s.split("|")]
+            name = parts[0] if parts else ""
+            pos: Optional[int] = None
+            typ: Optional[str] = None
+            note = ""
+
+            for p in parts[1:]:
+                pl = p.lower()
+                if pl.startswith("pos="):
+                    try:
+                        pos = int(re.sub(r"[^0-9]", "", p))
+                    except Exception:
+                        pos = None
+                elif pl.startswith("type="):
+                    typ = p.split("=", 1)[1].strip().lower()
+                elif pl.startswith("note="):
+                    note = p.split("=", 1)[1].strip()
+
+            if name:
+                item: Dict[str, Any] = {"name": name}
+                if pos is not None:
+                    item["position"] = pos
+                if typ in ("hard", "conditional"):
+                    item["type"] = typ
+                if note:
+                    item["note"] = note
+                notes.append(item)
+
+    out["comedogens_notes"] = notes[:30]
+    return out
+
+
+# ─────────────────────────────────────────────
+# Step 1
+# ─────────────────────────────────────────────
+
+async def run_agent_step1(product_name: Optional[str] = None, image_bytes: Optional[bytes] = None) -> str:
+    user_content = _build_user_content(product_name, image_bytes)
+
+    resp = await client.responses.create(
         model="gpt-5.2",
-        instructions=SYSTEM_PROMPT,
+        instructions=SYSTEM_PROMPT_STEP1,
         tools=[{"type": "web_search"}],
-        input=[
-            {
-                "role": "user",
-                "content": user_content,
-            }
-        ],
+        max_tool_calls=10,
+        input=[{"role": "user", "content": user_content}],
         max_output_tokens=2500,
         temperature=0,
     )
 
-    # Ожидаем, что модель вернёт один JSON-объект как текст.
-    return response.output_text
+    raw = (resp.output_text or "").strip()
+
+    # Делаем флаги ДЕТЕРМИНИРОВАННЫМИ (строго по базе)
+    obj = _safe_json_loads(raw)
+    if not obj:
+        return raw
+
+    ingredients = obj.get("ingredients")
+    if isinstance(ingredients, list) and ingredients:
+        apply_comedogenic_flags_strict(ingredients)
+        obj["ingredients"] = ingredients
+
+    # risk_level НЕ считаем тут — это делает bot.py (строго по правилам)
+    return json.dumps(obj, ensure_ascii=False)
+
+
+# ─────────────────────────────────────────────
+# Step 2
+# ─────────────────────────────────────────────
+
+async def run_agent_step2(step1_payload: Dict[str, Any]) -> str:
+    """
+    Step2:
+      1) web_search without JSON-mode => markers => parse => return JSON string
+      2) fallback without web_search in JSON-mode
+    """
+    product_name = step1_payload.get("product_name")
+    risk_level = step1_payload.get("risk_level")
+    ingredients = step1_payload.get("ingredients") or []
+
+    comedogens: List[Dict[str, Any]] = []
+    inci_list: List[str] = []
+
+    for idx, ing in enumerate(ingredients, start=1):
+        name = ing.get("name")
+        if not name:
+            continue
+        inci_list.append(name)
+        if ing.get("is_hard") or ing.get("is_conditional"):
+            comedogens.append(
+                {
+                    "name": name,
+                    "position": idx,
+                    "type": "hard" if ing.get("is_hard") else "conditional",
+                }
+            )
+
+    payload = {
+        "product_name": product_name,
+        "risk_level": risk_level,
+        "comedogens": comedogens,
+        "inci": inci_list,  # внутреннее поле для модели; пользователю это слово не показываем (в bot.py)
+    }
+
+    prompt_text_web = (
+        "Данные шага 1 (источник истины). Не выдумывай ингредиенты.\n"
+        "Сделай:\n"
+        "1) SUMMARY — короткое пояснение результата.\n"
+        "2) COMEDOGENS — по каждому комедогену: почему он может быть проблемным для пор (1–2 предложения).\n"
+        "3) OVERALL — общий вывод по продукту.\n"
+        "4) RECOMMENDATIONS — 3–7 практичных рекомендаций.\n\n"
+        "Верни СТРОГО с маркерами:\n"
+        "SUMMARY:\n"
+        "<абзац>\n\n"
+        "COMEDOGENS:\n"
+        "- <Name> | pos=<N> | type=<hard|conditional> | note=<...>\n\n"
+        "OVERALL:\n"
+        "<абзац>\n\n"
+        "RECOMMENDATIONS:\n"
+        "- ...\n\n"
+        "Данные:\n"
+        + json.dumps(payload, ensure_ascii=False)
+    )
+
+    try:
+        resp = await client.responses.create(
+            model="gpt-5.2",
+            instructions=SYSTEM_PROMPT_STEP2,
+            tools=[{"type": "web_search"}],
+            max_tool_calls=3,
+            input=[{"role": "user", "content": [{"type": "input_text", "text": prompt_text_web}]}],
+            max_output_tokens=1200,
+            temperature=0,
+        )
+
+        parsed = _parse_step2_marked_text_v2((resp.output_text or "").strip())
+        if parsed.get("summary") and parsed.get("recommendations"):
+            return json.dumps(parsed, ensure_ascii=False)
+
+        logger.warning("STEP2 web_search returned bad format; fallback to JSON-mode without web_search")
+
+    except Exception as e:
+        logger.warning("STEP2 web_search failed; fallback without web_search: %s", e)
+
+    # fallback JSON-mode (no web_search)
+    prompt_text_json = (
+        "json\n"
+        "Данные шага 1 (источник истины). Не выдумывай ингредиенты.\n"
+        "Верни СТРОГО JSON-объект:\n"
+        "{"
+        "\"summary\":\"...\","
+        "\"comedogens_notes\":[{\"name\":\"...\",\"position\":1,\"type\":\"hard\",\"note\":\"...\"}],"
+        "\"overall_notes\":\"...\","
+        "\"recommendations\":[\"...\",\"...\"]"
+        "}\n\n"
+        "Требования:\n"
+        "- summary: 1 абзац, спокойный тон, на 'ты'\n"
+        "- comedogens_notes: по каждому комедогену из данных\n"
+        "- overall_notes: 1 абзац про продукт в целом\n"
+        "- recommendations: 3–7 пунктов, практично, без лечения\n\n"
+        "Данные:\n"
+        + json.dumps(payload, ensure_ascii=False)
+    )
+
+    resp2 = await client.responses.create(
+        model="gpt-5.2",
+        instructions=SYSTEM_PROMPT_STEP2,
+        tools=[],
+        input=[{"role": "user", "content": [{"type": "input_text", "text": prompt_text_json}]}],
+        text={"format": {"type": "json_object"}},
+        max_output_tokens=900,
+        temperature=0,
+    )
+    return (resp2.output_text or "").strip()
+
+
+# Backwards compatibility
+async def run_agent(product_name: Optional[str] = None, image_bytes: Optional[bytes] = None) -> str:
+    return await run_agent_step1(product_name=product_name, image_bytes=image_bytes)
