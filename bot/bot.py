@@ -15,6 +15,8 @@ import time
 import re
 from typing import Any, Dict, List, Optional
 
+import os
+from aiohttp import web
 import httpx
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -31,7 +33,35 @@ from .config import TELEGRAM_BOT_TOKEN
 from agent.agent import run_agent_step1, run_agent_step2
 from agent.comedogen_base import hard_comedogens, conditional_comedogens
 
+
 logging.basicConfig(level=logging.INFO)
+
+# ─────────────────────────────────────────────────────────────
+# Render health server
+# ─────────────────────────────────────────────────────────────
+
+RENDER_PORT = int(os.getenv("PORT", "10000"))
+
+
+async def _health_app() -> web.Application:
+    app = web.Application()
+
+    async def health(request: web.Request) -> web.Response:
+        return web.Response(text="ok")
+
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    return app
+
+
+async def _run_health_server() -> None:
+    app = await _health_app()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=RENDER_PORT)
+    await site.start()
+    logging.info("Health server started on port %s", RENDER_PORT)
+
 
 # ─────────────────────────────────────────────────────────────
 # Визуальные разделители
@@ -275,13 +305,11 @@ def _mark_for_component(is_hard: bool, is_cond: bool) -> str:
 def _clean_text(t: str) -> str:
     t = (t or "").strip()
     t = re.sub(r"\n{3,}", "\n\n", t)
-    # убираем формулировки вроде "по вашим данным", если вдруг всплыли
     t = re.sub(r"\bпо вашим данным\b[:,]?\s*", "", t, flags=re.IGNORECASE)
     return t
 
 
-# Разумное сокращение (чтобы Step2 не превращался в простыню)
-_SENT_SPLIT = re.compile(r'(?<=[.!?…])\s+')
+_SENT_SPLIT = re.compile(r"(?<=[.!?…])\s+")
 
 
 def _short_text(t: str, *, max_sentences: int = 2, max_chars: int = 500) -> str:
@@ -300,7 +328,6 @@ def _short_text(t: str, *, max_sentences: int = 2, max_chars: int = 500) -> str:
 # ─────────────────────────────────────────────────────────────
 
 def build_step1_brief_message(data: Dict[str, Any]) -> str:
-    """Краткий результат: риск + контекст + кнопки"""
     if data.get("error") == "no_inci":
         product_name = data.get("product_name") or "Продукт"
         lines = [
@@ -344,7 +371,6 @@ def build_step1_brief_message(data: Dict[str, Any]) -> str:
 
 
 def build_composition_message(data: Dict[str, Any]) -> str:
-    """Полный состав (по кнопке)"""
     product_name = data.get("product_name") or "Продукт"
     ingredients = data.get("ingredients") or []
     source_url = data.get("source_url")
@@ -360,7 +386,6 @@ def build_composition_message(data: Dict[str, Any]) -> str:
         "",
     ]
 
-    # Отмеченные компоненты + позиции
     has_comedogens = any(bool(ing.get("is_hard") or ing.get("is_conditional")) for ing in ingredients)
 
     if has_comedogens:
@@ -379,7 +404,6 @@ def build_composition_message(data: Dict[str, Any]) -> str:
         lines.append(DIVIDER_LIGHT)
         lines.append("")
 
-    # Весь состав
     lines.append("<b>Список ингредиентов:</b>")
     lines.append("")
     for idx, ing in enumerate(ingredients, start=1):
@@ -393,14 +417,12 @@ def build_composition_message(data: Dict[str, Any]) -> str:
     lines.append(DIVIDER_LIGHT)
     lines.append("")
 
-    # Легенда
     lines.append("💭 <b>Обозначения:</b>")
     lines.append("")
     lines.append("🔴 — жёсткие комедогенные компоненты")
     lines.append("🟠 — условно-комедогенные компоненты")
     lines.append("⚪️ — не отмечены как комедогенные")
 
-    # Ссылка
     if source_url:
         lines.append("")
         lines.append(DIVIDER_LIGHT)
@@ -415,7 +437,6 @@ def build_composition_message(data: Dict[str, Any]) -> str:
 
 
 def build_step2_message(step2_data: Dict[str, Any], product_name: Optional[str] = None, risk_level: Optional[str] = None) -> str:
-    """Пояснение и рекомендации (по кнопке)"""
     summary = _short_text(step2_data.get("summary") or "", max_sentences=3, max_chars=650)
     overall = _short_text(step2_data.get("overall_notes") or "", max_sentences=2, max_chars=420)
     notes = step2_data.get("comedogens_notes") or []
@@ -473,7 +494,6 @@ def build_step2_message(step2_data: Dict[str, Any], product_name: Optional[str] 
         lines.append(DIVIDER_LIGHT)
         lines.append("")
 
-    # "Общая оценка" часто дублирует summary → показываем только если summary пустой
     if overall and not summary:
         lines.append("<b>Общая оценка</b> 🌸")
         lines.append("")
@@ -489,7 +509,7 @@ def build_step2_message(step2_data: Dict[str, Any], product_name: Optional[str] 
             rr = _short_text(str(r), max_sentences=2, max_chars=240)
             if rr:
                 lines.append(f"• {rr}")
-                lines.append("")  # разделяем рекомендации визуально
+                lines.append("")
 
         while lines and lines[-1] == "":
             lines.pop()
@@ -589,7 +609,6 @@ async def handle_text(msg: Message, bot: Bot):
 
 
 async def handle_composition_callback(cb: CallbackQuery):
-    """Показать полный состав (по кнопке 🧾)"""
     payload = cb.data or ""
     if not payload.startswith("composition:"):
         return
@@ -631,7 +650,6 @@ async def _run_step2_background(bot: Bot, chat_id: int, step1_data: Dict[str, An
 
 
 async def handle_step2_callback(cb: CallbackQuery, bot: Bot):
-    """Показать пояснение и рекомендации (по кнопке 📘)"""
     payload = cb.data or ""
     if not payload.startswith("step2:"):
         return
@@ -659,7 +677,7 @@ async def handle_step2_callback(cb: CallbackQuery, bot: Bot):
 # Run
 # ─────────────────────────────────────────────────────────────
 
-def main():
+async def _main_async():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
@@ -682,7 +700,13 @@ def main():
     dp.callback_query.register(handle_step2_callback, F.data.startswith("step2:"))
 
     logging.info("ComedoBot started (FINAL BALANCED UX)")
-    asyncio.run(dp.start_polling(bot))
+
+    await _run_health_server()
+    await dp.start_polling(bot)
+
+
+def main():
+    asyncio.run(_main_async())
 
 
 if __name__ == "__main__":
