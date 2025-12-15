@@ -1,11 +1,10 @@
 """
-ComedoBot — Telegram bot (aiogram 3)
+ComedoBot — Telegram bot (aiogram 3) — FINAL BALANCED VERSION
 
 Логика:
-- Шаг 1: после фото/названия → показываем только результат:
-  риск → название → отмеченные компоненты → состав (визуально ранжирован) → ссылка (если есть)
-  (без пояснения и рекомендаций)
-- Шаг 2: по кнопке → отдельным сообщением приходит пояснение и советы (в фоне, без таймаута).
+- Шаг 1: краткий результат (риск + контекст) + 2 кнопки
+- Кнопка 1: "Посмотреть состав" → полный список ингредиентов
+- Кнопка 2: "Подробнее" → пояснение + рекомендации
 """
 
 import asyncio
@@ -35,45 +34,97 @@ from agent.comedogen_base import hard_comedogens, conditional_comedogens
 logging.basicConfig(level=logging.INFO)
 
 # ─────────────────────────────────────────────────────────────
+# Визуальные разделители
+# ─────────────────────────────────────────────────────────────
+
+DIVIDER_LIGHT = "· · · · · · · · · · · · · · · · · · · · · · ·"
+DIVIDER_ACCENT = "🫧 · · · · · · · · · · · · · · · · · · · 🫧"
+
+# ─────────────────────────────────────────────────────────────
 # Тексты (UX)
 # ─────────────────────────────────────────────────────────────
 
-START_MESSAGE = """Привет 👋
+START_MESSAGE = f"""Привет 🫧
 
-Пришли мне:
-📸 фото бьюти-средства (можно лицевую и/или оборот)
-или
-✍️ название (бренд + продукт)
+Я помогаю оценить риск комедогенности — то есть вероятность забивания пор. 🤍
 
-Я покажу уровень риска и подсвечу “подозрительные” компоненты в составе ✨
-А подробный разбор и рекомендации — по кнопке 📘"""
+Пришли фото средства (упаковку или оборот с составом) или напиши название — бренд и продукт 🩵
 
-HELP_MESSAGE = """Как пользоваться 👇
+В ответ ты получишь:
+• уровень риска
+• краткое пояснение
+• кнопки: «Посмотреть состав» и «Подробнее» ✨
 
-1) Отправь фото или название средства
-2) В первом ответе будет:
-   🟢🟡🔴 уровень риска
-   ⚠️ что в составе может забивать поры (с позициями)
-   🧾 весь состав с метками
+{DIVIDER_ACCENT}"""
 
-Потом можно нажать:
-📘 «Пояснение и рекомендации» — и придёт второй ответ (почему так + как лучше использовать)."""
+HELP_MESSAGE = f"""<b>Как пользоваться</b> 🫧
 
-ABOUT_MESSAGE = """О боте 🤖
+Отправь фото средства или напиши его название.
 
-ComedoBot помогает оценить риск “забивания пор” по составу косметики.
+Ты получишь:
+• уровень риска комедогенности
+• краткое пояснение
+• кнопку «🧾 Посмотреть состав» — полный список ингредиентов с отметками
+• кнопку «📘 Подробнее» — пояснение и рекомендации
 
-📌 Первый ответ — только результат.
-📘 Пояснение и рекомендации — отдельной кнопкой.
+{DIVIDER_LIGHT}
 
-Важно: это не медицинская консультация."""
+<b>Как интерпретировать результат</b> 🤍
 
-# Обезличенно, без “ищу/сравниваю”
-PROCESSING_PHOTO = "📸 Секунду… сейчас посмотрю ✨"
-PROCESSING_TEXT = "🔎 Секунду… сейчас разберусь ✨"
-PROCESSING_STEP2 = "📘 Готовлю пояснение и рекомендации…"
-ERROR_GENERAL = "Упс, не получилось. Попробуй ещё раз 🙏"
-ERROR_EMPTY = "Пришли фото или название средства 🙂"
+🔴 <b>Высокий риск</b>
+Есть компоненты, которые чаще провоцируют комедоны у склонной кожи.
+
+🟠 <b>Средний риск</b>
+Есть условно-комедогенные компоненты — возможна реакция при регулярном использовании.
+
+🟡 <b>Низкий риск</b>
+Есть отдельные условно-комедогенные компоненты — чаще переносится спокойно, но индивидуальная реакция возможна.
+
+⚪️ <b>Риск не выявлен</b>
+Комедогенные компоненты не обнаружены.
+
+{DIVIDER_LIGHT}
+
+<b>Важно</b> 🌸
+
+Комедогенность — не абсолютная характеристика: реакция кожи индивидуальна и зависит от множества факторов.
+
+Высокий риск не означает, что средство точно не подойдёт. Низкий риск не гарантирует отсутствие реакции.
+
+Это инструмент для информированного выбора, а не диагностика.
+
+{DIVIDER_ACCENT}"""
+
+ABOUT_MESSAGE = f"""<b>О боте</b> 🤍
+
+{DIVIDER_LIGHT}
+
+<b>Что это</b>
+
+ComedoBot помогает ориентироваться в составе косметики и оценивать риск комедогенности.
+
+{DIVIDER_LIGHT}
+
+<b>Что это НЕ</b>
+
+• Не медицинская консультация  
+• Не диагностика состояния кожи  
+• Не гарантия реакции или её отсутствия  
+• Не повод отменять назначенное лечение
+
+{DIVIDER_LIGHT}
+
+<b>Куда за медицинскими вопросами</b> 🩵
+
+Если нужна консультация дерматолога или разбор под твою кожу — напиши в Telegram: @DrDubinsky
+
+{DIVIDER_ACCENT}"""
+
+PROCESSING_PHOTO = "🫧 Анализирую фото…"
+PROCESSING_TEXT = "🫧 Ищу состав…"
+PROCESSING_STEP2 = "🫧 Готовлю подробное пояснение…"
+ERROR_GENERAL = "Не удалось обработать запрос. Попробуй ещё раз или отправь другое фото."
+ERROR_EMPTY = "Отправь фото средства или напиши его название."
 
 
 # ─────────────────────────────────────────────────────────────
@@ -82,17 +133,24 @@ ERROR_EMPTY = "Пришли фото или название средства �
 
 def _build_base_message() -> str:
     lines: List[str] = []
-    lines.append("📚 <b>/base — список отмечаемых компонентов</b>\n")
+    lines.append(f"{DIVIDER_ACCENT}\n")
+    lines.append("<b>Справочник отмечаемых компонентов</b>\n")
+    lines.append(f"{DIVIDER_LIGHT}\n")
 
-    lines.append("🔴 <b>Жёсткие</b>")
+    lines.append("🔴 <b>Жёсткие комедогенные компоненты</b>")
+    lines.append("Компоненты, которые чаще вызывают комедоны у склонной кожи.\n")
     for name in sorted(hard_comedogens):
         lines.append(f"• {name}")
     lines.append("")
+    lines.append(DIVIDER_LIGHT)
+    lines.append("")
 
-    lines.append("🟡 <b>Условные</b> (ранняя позиция ≤ 5)")
-    for name, cutoff in sorted(conditional_comedogens.items()):
-        lines.append(f"• {name} (≤ {cutoff})")
+    lines.append("🟠 <b>Условно-комедогенные компоненты</b>")
+    lines.append("Их влияние чаще зависит от индивидуальной реакции кожи и способа использования.\n")
+    for name in sorted(conditional_comedogens.keys()):
+        lines.append(f"• {name}")
 
+    lines.append(f"\n{DIVIDER_ACCENT}")
     return "\n".join(lines)
 
 
@@ -114,20 +172,27 @@ async def _download_photo(bot: Bot, photo: PhotoSize) -> bytes:
 
 
 RISK_LABELS = {
-    "high": "🔴 <b>ВЫСОКИЙ РИСК</b>",
-    "medium": "🟡 <b>СРЕДНИЙ РИСК</b>",
-    "low": "🟢 <b>НИЗКИЙ РИСК</b>",
-    "none": "⚪️ <b>РИСК НЕ ОБНАРУЖЕН</b>",
+    "high": "🔴 <b>Высокий риск комедогенности</b>",
+    "medium": "🟠 <b>Средний риск комедогенности</b>",
+    "low": "🟡 <b>Низкий риск комедогенности</b>",
+    "none": "⚪️ <b>Риск комедогенности не выявлен</b>",
 }
 
 RISK_SHORT = {
     "high": "🔴 высокий",
-    "medium": "🟡 средний",
-    "low": "🟢 низкий",
-    "none": "⚪️ не обнаружен",
+    "medium": "🟠 средний",
+    "low": "🟡 низкий",
+    "none": "⚪️ не выявлен",
 }
 
-EARLY_CUTOFF = 5  # ранняя позиция = ≤ 5
+RISK_CONTEXT = {
+    "high": "В составе есть компоненты, которые чаще провоцируют комедоны у склонной кожи. Это не означает, что средство точно не подойдёт — реакция индивидуальна. Попробуй тест на небольшом участке и понаблюдай 3–7 дней. 🤍",
+    "medium": "В составе есть условно-комедогенные компоненты. Если кожа склонна к комедонам, вводи средство постепенно и отслеживай реакцию. 🫧",
+    "low": "Есть отдельные условно-комедогенные компоненты. Риск обычно невысокий, но индивидуальная реакция возможна. 🌸",
+    "none": "Комедогенные компоненты не обнаружены. С точки зрения комедогенности состав выглядит спокойным. 🤍",
+}
+
+EARLY_CUTOFF = 5  # используется в строгой логике, но не объясняется пользователю
 
 
 def calc_risk_level_strict(ingredients: List[Dict[str, Any]]) -> str:
@@ -156,8 +221,8 @@ def calc_risk_level_strict(ingredients: List[Dict[str, Any]]) -> str:
 
 # Кэш для шага 2 (в памяти)
 STEP2_CACHE: Dict[str, Dict[str, Any]] = {}
-STEP2_CACHE_TTL_SEC = 15 * 60  # 15 минут
-STEP2_INFLIGHT: Dict[str, float] = {}  # token -> ts (анти-дубль)
+STEP2_CACHE_TTL_SEC = 15 * 60
+STEP2_INFLIGHT: Dict[str, float] = {}
 
 
 def _cache_put(step1_data: Dict[str, Any]) -> str:
@@ -190,170 +255,253 @@ def _parse_agent_json(raw: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _build_step2_keyboard(token: str) -> InlineKeyboardMarkup:
+def _build_step1_keyboard(token: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📘 Пояснение и рекомендации", callback_data=f"step2:{token}")]
+            [InlineKeyboardButton(text="🧾 Посмотреть состав", callback_data=f"composition:{token}")],
+            [InlineKeyboardButton(text="📘 Подробнее", callback_data=f"step2:{token}")],
         ]
     )
 
 
-def _mark_for_component(is_hard: bool, is_cond: bool, position: int) -> str:
+def _mark_for_component(is_hard: bool, is_cond: bool) -> str:
     if is_hard:
         return "🔴"
     if is_cond:
-        return "🟡⚡" if position <= EARLY_CUTOFF else "🟡"
-    return "⚪"
+        return "🟠"
+    return "⚪️"
 
 
 def _clean_text(t: str) -> str:
     t = (t or "").strip()
     t = re.sub(r"\n{3,}", "\n\n", t)
+    # убираем формулировки вроде "по вашим данным", если вдруг всплыли
+    t = re.sub(r"\bпо вашим данным\b[:,]?\s*", "", t, flags=re.IGNORECASE)
     return t
+
+
+# Разумное сокращение (чтобы Step2 не превращался в простыню)
+_SENT_SPLIT = re.compile(r'(?<=[.!?…])\s+')
+
+
+def _short_text(t: str, *, max_sentences: int = 2, max_chars: int = 500) -> str:
+    t = _clean_text(t or "")
+    if not t:
+        return ""
+    parts = _SENT_SPLIT.split(t)
+    out = " ".join(parts[:max_sentences]).strip()
+    if len(out) > max_chars:
+        out = out[:max_chars].rstrip(" ,.;:—-") + "…"
+    return out
 
 
 # ─────────────────────────────────────────────────────────────
 # Формат сообщений
 # ─────────────────────────────────────────────────────────────
 
-def build_step1_message(data: Dict[str, Any]) -> str:
-    # если состав не удалось получить/прочитать
+def build_step1_brief_message(data: Dict[str, Any]) -> str:
+    """Краткий результат: риск + контекст + кнопки"""
     if data.get("error") == "no_inci":
         product_name = data.get("product_name") or "Продукт"
         lines = [
-            "😕 <b>Не получилось разобрать состав</b>",
+            DIVIDER_ACCENT,
+            "",
+            "<b>Состав не найден</b> 🤍",
             "",
             f"🧴 <b>{product_name}</b>",
             "",
-            "Что можно сделать 👇",
-            "• фото при хорошем свете",
-            "• крупнее оборот (чтобы текст был читабельным)",
-            "• или пришли точное название текстом ✍️",
+            DIVIDER_LIGHT,
+            "",
+            "Не удалось найти достоверный состав в открытых источниках.",
+            "",
+            "<b>Что можно сделать:</b>",
+            "",
+            "• сделай фото оборотной стороны упаковки при хорошем освещении",
+            "• проверь, чтобы текст состава был чётким и не размытым",
+            "• отправь точное название (бренд + линейка + продукт)",
+            "",
+            DIVIDER_ACCENT,
         ]
         return "\n".join(lines)
 
     product_name = data.get("product_name") or "Продукт"
     risk_level = data.get("risk_level") or "none"
+
+    lines = [
+        DIVIDER_ACCENT,
+        "",
+        RISK_LABELS.get(risk_level, RISK_LABELS["none"]),
+        "",
+        f"🧴 <b>{product_name}</b>",
+        "",
+        DIVIDER_LIGHT,
+        "",
+        RISK_CONTEXT.get(risk_level, ""),
+        "",
+        DIVIDER_ACCENT,
+    ]
+    return "\n".join(lines)
+
+
+def build_composition_message(data: Dict[str, Any]) -> str:
+    """Полный состав (по кнопке)"""
+    product_name = data.get("product_name") or "Продукт"
     ingredients = data.get("ingredients") or []
     source_url = data.get("source_url")
 
-    lines: List[str] = []
+    lines = [
+        DIVIDER_ACCENT,
+        "",
+        "<b>Состав</b> 🫧",
+        "",
+        f"🧴 <b>{product_name}</b>",
+        "",
+        DIVIDER_LIGHT,
+        "",
+    ]
 
-    # 1) риск
-    lines.append(RISK_LABELS.get(risk_level, RISK_LABELS["none"]))
-    lines.append("")
+    # Отмеченные компоненты + позиции
+    has_comedogens = any(bool(ing.get("is_hard") or ing.get("is_conditional")) for ing in ingredients)
 
-    # 2) название
-    lines.append(f"🧴 <b>{product_name}</b>")
-    lines.append("")
-    lines.append("")
-
-    # 3) отмеченные компоненты
-    lines.append("⚠️ <b>Что в составе может забивать поры</b>")
-    found = False
-    for idx, ing in enumerate(ingredients, start=1):
-        name = ing.get("name")
-        if not name:
-            continue
-        is_hard = bool(ing.get("is_hard"))
-        is_cond = bool(ing.get("is_conditional"))
-        if is_hard or is_cond:
-            found = True
-            mark = _mark_for_component(is_hard, is_cond, idx)
-            lines.append(f"{mark} {name} — {idx}")
-
-    if not found:
-        lines.append("✨ По составу — ничего явно “подозрительного” не вижу.")
-    lines.append("")
-
-    # 4) весь состав (с метками на каждой строке)
-    lines.append("🧾 <b>Состав</b>")
-    for idx, ing in enumerate(ingredients, start=1):
-        name = ing.get("name")
-        if not name:
-            continue
-        mark = _mark_for_component(bool(ing.get("is_hard")), bool(ing.get("is_conditional")), idx)
-        lines.append(f"{mark} {idx}. {name}")
-    lines.append("")
-
-    # 5) ссылка (без лишних оговорок)
-    if source_url:
-        lines.append("🔗 <b>Ссылка</b>")
-        lines.append(f'<a href="{source_url}">{product_name}</a>')
+    if has_comedogens:
+        lines.append("<b>Отмеченные компоненты:</b>")
+        lines.append("")
+        for idx, ing in enumerate(ingredients, start=1):
+            name = ing.get("name")
+            if not name:
+                continue
+            is_hard = bool(ing.get("is_hard"))
+            is_cond = bool(ing.get("is_conditional"))
+            if is_hard or is_cond:
+                mark = _mark_for_component(is_hard, is_cond)
+                lines.append(f"{mark} {idx}. {name}")
+        lines.append("")
+        lines.append(DIVIDER_LIGHT)
         lines.append("")
 
-    # 6) мини-легенда (чтобы было понятно с первого взгляда)
-    lines.append("🧷 <i>Метки:</i> 🔴 высокий риск · 🟡⚡ условный (в начале состава) · 🟡 условный · ⚪ остальное")
+    # Весь состав
+    lines.append("<b>Список ингредиентов:</b>")
     lines.append("")
-    lines.append("👇 Хочешь понять «почему так» и как лучше использовать — жми 📘")
+    for idx, ing in enumerate(ingredients, start=1):
+        name = ing.get("name")
+        if not name:
+            continue
+        mark = _mark_for_component(bool(ing.get("is_hard")), bool(ing.get("is_conditional")))
+        lines.append(f"{mark} {idx}. {name}")
+
+    lines.append("")
+    lines.append(DIVIDER_LIGHT)
+    lines.append("")
+
+    # Легенда
+    lines.append("💭 <b>Обозначения:</b>")
+    lines.append("")
+    lines.append("🔴 — жёсткие комедогенные компоненты")
+    lines.append("🟠 — условно-комедогенные компоненты")
+    lines.append("⚪️ — не отмечены как комедогенные")
+
+    # Ссылка
+    if source_url:
+        lines.append("")
+        lines.append(DIVIDER_LIGHT)
+        lines.append("")
+        lines.append("🔗 <b>Источник состава:</b>")
+        lines.append(f'<a href="{source_url}">{product_name}</a>')
+
+    lines.append("")
+    lines.append(DIVIDER_ACCENT)
 
     return "\n".join(lines)
 
 
 def build_step2_message(step2_data: Dict[str, Any], product_name: Optional[str] = None, risk_level: Optional[str] = None) -> str:
-    summary = _clean_text(step2_data.get("summary") or "")
-    overall = _clean_text(step2_data.get("overall_notes") or "")
+    """Пояснение и рекомендации (по кнопке)"""
+    summary = _short_text(step2_data.get("summary") or "", max_sentences=3, max_chars=650)
+    overall = _short_text(step2_data.get("overall_notes") or "", max_sentences=2, max_chars=420)
     notes = step2_data.get("comedogens_notes") or []
     recs = step2_data.get("recommendations") or []
 
-    lines: List[str] = []
+    lines = [
+        DIVIDER_ACCENT,
+        "",
+        "<b>Подробнее</b> 🩵",
+        "",
+    ]
 
-    lines.append("📘 <b>Пояснение и рекомендации</b>")
     if product_name:
         lines.append(f"🧴 <b>{product_name}</b>")
     if risk_level:
-        lines.append(f"🏷️ Риск: <b>{RISK_SHORT.get(risk_level, '⚪️ не обнаружен')}</b>")
+        lines.append(f"🏷️ Уровень риска: <b>{RISK_SHORT.get(risk_level, '⚪️ не выявлен')}</b>")
+
+    lines.append("")
+    lines.append(DIVIDER_LIGHT)
     lines.append("")
 
     if summary:
-        lines.append("🗣️ <b>Что это значит</b>")
+        lines.append("<b>Коротко о результате</b> 🤍")
+        lines.append("")
         lines.append(summary)
+        lines.append("")
+        lines.append(DIVIDER_LIGHT)
         lines.append("")
 
     if notes:
-        lines.append("🧪 <b>На что обратить внимание</b>")
-        for item in notes[:12]:
+        lines.append("<b>Что в составе может быть чувствительным для склонной кожи</b> 🫧")
+        lines.append("")
+        for item in notes[:5]:
             name = (item.get("name") or "").strip()
-            pos = item.get("position")
             typ = (item.get("type") or "").strip().lower()
-            note = _clean_text(item.get("note") or "")
+            pos = item.get("position")
+            note = _short_text(item.get("note") or "", max_sentences=1, max_chars=260)
+
             if not name:
                 continue
 
             is_hard = (typ == "hard")
             is_cond = (typ == "conditional")
-            pos_int = int(pos) if isinstance(pos, int) else None
-            mark = _mark_for_component(is_hard, is_cond, pos_int or 999)
+            mark = _mark_for_component(is_hard, is_cond)
 
-            # чуть более “воздушно”: название отдельно, пояснение отдельной строкой
-            head = f"{mark} <b>{name}</b>"
-            if pos_int:
-                head += f" <i>(№{pos_int})</i>"
-            lines.append(head)
+            pos_txt = f" (№{pos})" if isinstance(pos, int) else ""
+            lines.append(f"{mark} <b>{name}{pos_txt}</b>")
             if note:
-                lines.append(f"— {note}")
-            lines.append("")  # пустая строка между пунктами
+                lines.append(note)
+            lines.append("")
 
-        # убираем лишний хвостовой перенос
         while lines and lines[-1] == "":
             lines.pop()
         lines.append("")
+        lines.append(DIVIDER_LIGHT)
+        lines.append("")
 
-    if overall:
-        lines.append("✨ <b>В целом</b>")
+    # "Общая оценка" часто дублирует summary → показываем только если summary пустой
+    if overall and not summary:
+        lines.append("<b>Общая оценка</b> 🌸")
+        lines.append("")
         lines.append(overall)
+        lines.append("")
+        lines.append(DIVIDER_LIGHT)
         lines.append("")
 
     if recs:
-        lines.append("✅ <b>Как использовать, чтобы было спокойнее</b>")
-        for r in recs[:10]:
-            rr = _clean_text(str(r))
+        lines.append("<b>Рекомендации</b> ✨")
+        lines.append("")
+        for r in recs[:5]:
+            rr = _short_text(str(r), max_sentences=2, max_chars=240)
             if rr:
-                lines.append(f"☑️ {rr}")
+                lines.append(f"• {rr}")
+                lines.append("")  # разделяем рекомендации визуально
+
+        while lines and lines[-1] == "":
+            lines.pop()
+        lines.append("")
+        lines.append(DIVIDER_LIGHT)
         lines.append("")
 
-    lines.append("🤍 Напомню: это не диагноз и не лечение — просто удобная подсветка по составу.")
-    return "\n".join(lines).strip() or "😕 Не получилось сформировать пояснение."
+    lines.append("💭 <i>Информация для ориентира, не медицинская консультация. По вопросам кожи — @DrDubinsky.</i>")
+    lines.append("")
+    lines.append(DIVIDER_ACCENT)
+
+    return "\n".join(lines).strip() or "Не удалось сформировать пояснение."
 
 
 # ─────────────────────────────────────────────────────────────
@@ -389,7 +537,7 @@ async def _run_step1_and_answer(msg: Message, bot: Bot, product_name: Optional[s
         if ingredients and data.get("error") != "no_inci":
             data["risk_level"] = calc_risk_level_strict(ingredients)
 
-        answer = build_step1_message(data)
+        answer = build_step1_brief_message(data)
 
         reply_markup: Optional[InlineKeyboardMarkup] = None
         if data.get("error") != "no_inci" and ingredients:
@@ -401,7 +549,7 @@ async def _run_step1_and_answer(msg: Message, bot: Bot, product_name: Optional[s
                     "ingredients": ingredients,
                 }
             )
-            reply_markup = _build_step2_keyboard(token)
+            reply_markup = _build_step1_keyboard(token)
 
         await status.delete()
         await msg.answer(answer, reply_markup=reply_markup)
@@ -440,12 +588,28 @@ async def handle_text(msg: Message, bot: Bot):
     await _run_step1_and_answer(msg, bot, product_name=text, image_bytes=None)
 
 
+async def handle_composition_callback(cb: CallbackQuery):
+    """Показать полный состав (по кнопке 🧾)"""
+    payload = cb.data or ""
+    if not payload.startswith("composition:"):
+        return
+
+    token = payload.split(":", 1)[1]
+    step1_data = _cache_get(token)
+    if not step1_data:
+        await cb.answer("Эта кнопка уже неактуальна. Отправь запрос заново.", show_alert=True)
+        return
+
+    await cb.answer()
+    await cb.message.answer(build_composition_message(step1_data), reply_markup=_build_step1_keyboard(token))
+
+
 async def _run_step2_background(bot: Bot, chat_id: int, step1_data: Dict[str, Any], token: str) -> None:
     try:
         raw2 = await run_agent_step2(step1_data)
         step2_json = _parse_agent_json(raw2)
         if not step2_json:
-            await bot.send_message(chat_id, "😕 Не получилось сделать пояснение. Попробуй ещё раз.")
+            await bot.send_message(chat_id, "Не удалось сформировать пояснение. Попробуй ещё раз.")
             return
 
         await bot.send_message(
@@ -459,7 +623,7 @@ async def _run_step2_background(bot: Bot, chat_id: int, step1_data: Dict[str, An
     except Exception as e:
         logging.error("STEP2 BACKGROUND ERROR: %s", e)
         try:
-            await bot.send_message(chat_id, "😕 Не получилось сделать пояснение. Попробуй ещё раз.")
+            await bot.send_message(chat_id, "Не удалось сформировать пояснение. Попробуй ещё раз.")
         except Exception:
             pass
     finally:
@@ -467,6 +631,7 @@ async def _run_step2_background(bot: Bot, chat_id: int, step1_data: Dict[str, An
 
 
 async def handle_step2_callback(cb: CallbackQuery, bot: Bot):
+    """Показать пояснение и рекомендации (по кнопке 📘)"""
     payload = cb.data or ""
     if not payload.startswith("step2:"):
         return
@@ -474,11 +639,11 @@ async def handle_step2_callback(cb: CallbackQuery, bot: Bot):
     token = payload.split(":", 1)[1]
     step1_data = _cache_get(token)
     if not step1_data:
-        await cb.answer("Эта кнопка уже неактуальна 🙈", show_alert=True)
+        await cb.answer("Эта кнопка уже неактуальна. Отправь запрос заново.", show_alert=True)
         return
 
     if token in STEP2_INFLIGHT:
-        await cb.answer("Уже готовлю ✨", show_alert=False)
+        await cb.answer("Уже формирую ответ.", show_alert=False)
         return
 
     STEP2_INFLIGHT[token] = time.time()
@@ -513,9 +678,10 @@ def main():
     dp.message.register(handle_photo, F.photo)
     dp.message.register(handle_text, F.text)
 
+    dp.callback_query.register(handle_composition_callback, F.data.startswith("composition:"))
     dp.callback_query.register(handle_step2_callback, F.data.startswith("step2:"))
 
-    logging.info("ComedoBot started")
+    logging.info("ComedoBot started (FINAL BALANCED UX)")
     asyncio.run(dp.start_polling(bot))
 
 
