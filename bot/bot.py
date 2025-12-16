@@ -224,6 +224,78 @@ RISK_CONTEXT = {
 
 EARLY_CUTOFF = 5  # используется в строгой логике, но не объясняется пользователю
 
+# ─────────────────────────────────────────────────────────────
+# Валидация source_url (чтобы не показывать "битые" ссылки)
+# ─────────────────────────────────────────────────────────────
+
+_URL_RE = re.compile(r"^https?://", flags=re.I)
+
+
+def _normalize_source_url(value: Any) -> Optional[str]:
+    """Возвращает URL только если это похоже на реальную ссылку."""
+    if not isinstance(value, str):
+        return None
+    url = value.strip()
+    if not url:
+        return None
+    if not _URL_RE.match(url):
+        return None
+    # минимальная чистка от кавычек/пробелов
+    url = url.strip(' "\'')
+    if not _URL_RE.match(url):
+        return None
+    return url
+
+
+def _norm_text_for_match(s: str) -> str:
+    s = (s or "").lower()
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+async def _validate_source_url(url: str, ingredients: List[Dict[str, Any]]) -> bool:
+    """
+    Быстрая проверка:
+    - страница открывается (200)
+    - на странице встречаются несколько ингредиентов из списка
+    """
+    if not url:
+        return False
+
+    # берем несколько первых "наиболее вероятных" ингредиентов (обычно они точно есть в INCI-блоке)
+    sample_names: List[str] = []
+    for ing in ingredients[:12]:
+        name = (ing.get("name") or "").strip()
+        if name and len(name) >= 4:
+            sample_names.append(name)
+
+    if len(sample_names) < 3:
+        # если ингредиентов мало/непонятно, не блокируем ссылку излишне строго
+        sample_names = [n for n in sample_names if n]
+
+    try:
+        timeout = httpx.Timeout(6.0, connect=5.0)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code != 200:
+                return False
+            text = _norm_text_for_match(resp.text)
+
+        # считаем попадания по подстроке (не идеально, но достаточно, чтобы отсеять "не туда")
+        hits = 0
+        for n in sample_names:
+            nn = _norm_text_for_match(n)
+            if nn and nn in text:
+                hits += 1
+            if hits >= 3:
+                return True
+
+        # если совсем не нашли совпадений — вероятно это не страница состава
+        return False
+
+    except Exception:
+        return False
+
 
 def calc_risk_level_strict(ingredients: List[Dict[str, Any]]) -> str:
     hard_positions: List[int] = []
@@ -423,12 +495,13 @@ def build_composition_message(data: Dict[str, Any]) -> str:
     lines.append("🟠 — условно-комедогенные компоненты")
     lines.append("⚪️ — не отмечены как комедогенные")
 
+    # ВАЖНО: источник показываем только если это валидный URL
     if source_url:
         lines.append("")
         lines.append(DIVIDER_LIGHT)
         lines.append("")
         lines.append("🔗 <b>Источник состава:</b>")
-        lines.append(f'<a href="{source_url}">{product_name}</a>')
+        lines.append(f'<a href="{source_url}">Открыть страницу</a>')
 
     lines.append("")
     lines.append(DIVIDER_ACCENT)
@@ -556,6 +629,15 @@ async def _run_step1_and_answer(msg: Message, bot: Bot, product_name: Optional[s
         ingredients = data.get("ingredients") or []
         if ingredients and data.get("error") != "no_inci":
             data["risk_level"] = calc_risk_level_strict(ingredients)
+
+        # ── Нормализуем и валидируем source_url (чтобы не показывать "битые" ссылки)
+        if data.get("error") != "no_inci":
+            su = _normalize_source_url(data.get("source_url"))
+            if su and ingredients:
+                ok = await _validate_source_url(su, ingredients)
+                data["source_url"] = su if ok else None
+            else:
+                data["source_url"] = None
 
         answer = build_step1_brief_message(data)
 

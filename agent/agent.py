@@ -58,7 +58,6 @@ _non_alnum = re.compile(r"[^a-z0-9\s-]+")
 _spaces = re.compile(r"\s+")
 
 # Производные кислот — НЕ считаются hard
-# (palmitate / stearate / laurate / myristate / caprate / caprylate и любые комбинации)
 _acid_derivative_pattern = re.compile(
     r"\b(palmitate|stearate|laurate|myristate|caprate|caprylate)\b",
     flags=re.I,
@@ -100,7 +99,6 @@ def classify_ingredient_strict(name: str, position: int) -> Dict[str, Any]:
     n = _norm(name)
 
     # ── HARD: wax special rule (in name)
-    # e.g. beeswax, candelilla wax, carnauba wax => hard
     if "wax" in n and _has_word(n, "wax"):
         return {"is_hard": True, "is_conditional": False, "early_conditional": False}
 
@@ -108,8 +106,7 @@ def classify_ingredient_strict(name: str, position: int) -> Dict[str, Any]:
     for term in hard_comedogens:
         t = _norm(term)
 
-        # acids: only exact "... acid" entries are allowed as hard;
-        # exclude derivatives like isopropyl palmitate etc.
+        # acids: only exact "... acid" entries are allowed as hard
         if t in (
             "palmitic acid",
             "stearic acid",
@@ -122,14 +119,8 @@ def classify_ingredient_strict(name: str, position: int) -> Dict[str, Any]:
                 return {"is_hard": True, "is_conditional": False, "early_conditional": False}
             continue
 
-        # if ingredient contains derivative tokens, never treat as hard acids
-        if _acid_derivative_pattern.search(n):
-            # but still allow other hard terms unrelated to acids (e.g. petrolatum)
-            pass
-
         if _matches_phrase(t, n):
-            # If it matched because of a derivative word (palmitate etc.) — reject.
-            # This prevents "isopropyl palmitate" from being treated as hard.
+            # защита от ложных срабатываний на производные кислот (на всякий случай)
             if _acid_derivative_pattern.search(n) and ("acid" in t):
                 continue
             return {"is_hard": True, "is_conditional": False, "early_conditional": False}
@@ -144,7 +135,7 @@ def classify_ingredient_strict(name: str, position: int) -> Dict[str, Any]:
                 return {"is_hard": False, "is_conditional": True, "early_conditional": position <= int(cutoff)}
             continue
 
-        # "methicone"/"dimethicone" — partial match allowed (per your rules)
+        # "methicone"/"dimethicone" — partial match allowed
         if t in ("methicone", "dimethicone"):
             if t in n:
                 return {"is_hard": False, "is_conditional": True, "early_conditional": position <= int(cutoff)}
@@ -164,8 +155,55 @@ def apply_comedogenic_flags_strict(ingredients: List[Dict[str, Any]]) -> None:
         flags = classify_ingredient_strict(name, idx)
         ing["is_hard"] = bool(flags["is_hard"])
         ing["is_conditional"] = bool(flags["is_conditional"])
-        # внутренний флаг (не обязателен, но полезен в отладке)
-        ing["_early_conditional"] = bool(flags["early_conditional"])
+        ing["_early_conditional"] = bool(flags["early_conditional"])  # внутренний флаг для отладки
+
+
+# ─────────────────────────────────────────────
+# URL sanitation for source_url (Step 1 output)
+# ─────────────────────────────────────────────
+
+_URL_HTTP_RE = re.compile(r"^https?://", flags=re.I)
+_URL_PROTOLESS_RE = re.compile(r"^(www\.)", flags=re.I)
+_URL_SCHEMELESS_RE = re.compile(r"^//")
+
+
+def _normalize_source_url(value: Any) -> Optional[str]:
+    """
+    Делает source_url безопасным:
+    - принимает только реальные URL
+    - нормализует //example.com -> https://example.com
+    - нормализует www.example.com -> https://www.example.com
+    - отсеивает "название продукта" и прочий текст
+    """
+    if not isinstance(value, str):
+        return None
+
+    url = value.strip()
+    if not url:
+        return None
+
+    # если есть пробелы/переносы — почти наверняка это не URL (как в твоём кейсе)
+    if any(ch in url for ch in (" ", "\n", "\t")):
+        return None
+
+    url = url.strip(' "\'()[]{}<>')
+    if not url:
+        return None
+
+    if _URL_SCHEMELESS_RE.match(url):
+        url = "https:" + url
+
+    if _URL_PROTOLESS_RE.match(url):
+        url = "https://" + url
+
+    if not _URL_HTTP_RE.match(url):
+        return None
+
+    # минимальная защита от мусора типа "https://"
+    if len(url) < 12:
+        return None
+
+    return url
 
 
 # ─────────────────────────────────────────────
@@ -204,26 +242,6 @@ def _strip_bullets(line: str) -> str:
 
 
 def _parse_step2_marked_text_v2(text: str) -> Dict[str, Any]:
-    """
-    Markers:
-
-    SUMMARY:
-    ...
-
-    COMEDOGENS:
-    - Name | pos=4 | type=hard | note=...
-    - ...
-
-    OVERALL:
-    ...
-
-    RECOMMENDATIONS:
-    - ...
-    - ...
-
-    Returns:
-      summary, comedogens_notes(list), overall_notes, recommendations(list)
-    """
     out: Dict[str, Any] = {
         "summary": "",
         "comedogens_notes": [],
@@ -321,6 +339,9 @@ async def run_agent_step1(product_name: Optional[str] = None, image_bytes: Optio
         apply_comedogenic_flags_strict(ingredients)
         obj["ingredients"] = ingredients
 
+    # ✅ ВАЖНО: source_url либо валидный URL, либо null
+    obj["source_url"] = _normalize_source_url(obj.get("source_url"))
+
     # risk_level НЕ считаем тут — это делает bot.py (строго по правилам)
     return json.dumps(obj, ensure_ascii=False)
 
@@ -330,11 +351,6 @@ async def run_agent_step1(product_name: Optional[str] = None, image_bytes: Optio
 # ─────────────────────────────────────────────
 
 async def run_agent_step2(step1_payload: Dict[str, Any]) -> str:
-    """
-    Step2:
-      1) web_search without JSON-mode => markers => parse => return JSON string
-      2) fallback without web_search in JSON-mode
-    """
     product_name = step1_payload.get("product_name")
     risk_level = step1_payload.get("risk_level")
     ingredients = step1_payload.get("ingredients") or []
@@ -360,7 +376,7 @@ async def run_agent_step2(step1_payload: Dict[str, Any]) -> str:
         "product_name": product_name,
         "risk_level": risk_level,
         "comedogens": comedogens,
-        "inci": inci_list,  # внутреннее поле для модели; пользователю это слово не показываем (в bot.py)
+        "inci": inci_list,
     }
 
     prompt_text_web = (
@@ -403,7 +419,6 @@ async def run_agent_step2(step1_payload: Dict[str, Any]) -> str:
     except Exception as e:
         logger.warning("STEP2 web_search failed; fallback without web_search: %s", e)
 
-    # fallback JSON-mode (no web_search)
     prompt_text_json = (
         "json\n"
         "Данные шага 1 (источник истины). Не выдумывай ингредиенты.\n"
@@ -435,6 +450,5 @@ async def run_agent_step2(step1_payload: Dict[str, Any]) -> str:
     return (resp2.output_text or "").strip()
 
 
-# Backwards compatibility
 async def run_agent(product_name: Optional[str] = None, image_bytes: Optional[bytes] = None) -> str:
     return await run_agent_step1(product_name=product_name, image_bytes=image_bytes)
