@@ -83,9 +83,7 @@ START_MESSAGE = f"""Привет 🫧
 В ответ ты получишь:
 • уровень риска
 • краткое пояснение
-• кнопки: «Посмотреть состав» и «Подробнее» ✨
-
-{DIVIDER_ACCENT}"""
+• кнопки: «Посмотреть состав» и «Подробнее» ✨"""
 
 HELP_MESSAGE = f"""<b>Как пользоваться</b> 🫧
 
@@ -128,9 +126,7 @@ HELP_MESSAGE = f"""<b>Как пользоваться</b> 🫧
 <b>Команды</b> 🫧
 
 /about — о боте и ограничениях
-/contacts — контакты по консультациям и работе бота
-
-{DIVIDER_ACCENT}"""
+/contacts — контакты"""
 
 ABOUT_MESSAGE = f"""<b>О боте</b> 🤍
 
@@ -138,7 +134,7 @@ ABOUT_MESSAGE = f"""<b>О боте</b> 🤍
 
 <b>Что это</b>
 
-ComedoBot помогает ориентироваться в составе косметики и оценивать риск комедогенности.
+CreamcheckBot помогает ориентироваться в составе косметики и оценивать риск комедогенности.
 
 {DIVIDER_LIGHT}
 
@@ -159,9 +155,7 @@ ComedoBot помогает ориентироваться в составе ко
 
 <b>По вопросам работы бота</b> 🤍
 
-По вопросам работы бота, автоматизации и разработки сервисов: @elenaisanewleet
-
-{DIVIDER_ACCENT}"""
+По вопросам работы бота, автоматизации и разработки сервисов: @elenaisanewleet"""
 
 CONTACTS_MESSAGE = f"""<b>Контакты</b> 🫧
 
@@ -177,13 +171,9 @@ CONTACTS_MESSAGE = f"""<b>Контакты</b> 🫧
 
 <b>Вопросы по работе бота и разработке</b> 🤍
 
-Если бот работает некорректно, не нашёл состав, выдал странный результат или есть идея по улучшению — можно написать:
+Если бот работает некорректно, не нашёл состав, выдал странный результат или есть идея по улучшению — можно написать по этому контакту.
 
-@elenaisanewleet
-
-По вопросам работы бота, автоматизации и разработки сервисов: @elenaisanewleet
-
-{DIVIDER_ACCENT}"""
+По вопросам работы бота, автоматизации и разработки сервисов: @elenaisanewleet"""
 
 PROCESSING_PHOTO = "🫧 Анализирую фото…"
 PROCESSING_TEXT = "🫧 Ищу состав…"
@@ -647,19 +637,19 @@ def build_step2_message(step2_data: Dict[str, Any], product_name: Optional[str] 
 # ─────────────────────────────────────────────────────────────
 
 async def handle_start(msg: Message):
-    await msg.answer(START_MESSAGE)
+    await msg.answer(f"{START_MESSAGE}\n\n{build_doctor_cta_footer()}")
 
 
 async def handle_help(msg: Message):
-    await msg.answer(HELP_MESSAGE)
+    await msg.answer(f"{HELP_MESSAGE}\n\n{build_doctor_cta_footer()}")
 
 
 async def handle_about(msg: Message):
-    await msg.answer(ABOUT_MESSAGE)
+    await msg.answer(f"{ABOUT_MESSAGE}\n\n{build_doctor_cta_footer()}")
 
 
 async def handle_contacts(msg: Message):
-    await msg.answer(CONTACTS_MESSAGE)
+    await msg.answer(f"{CONTACTS_MESSAGE}\n\n{build_doctor_cta_footer()}")
 
 
 async def handle_base(msg: Message):
@@ -831,7 +821,7 @@ async def _main_async():
     dp.callback_query.register(handle_composition_callback, F.data.startswith("composition:"))
     dp.callback_query.register(handle_step2_callback, F.data.startswith("step2:"))
 
-    logging.info("ComedoBot started (FINAL BALANCED UX)")
+    logging.info("CreamcheckBot started (FINAL BALANCED UX)")
 
     await _run_health_server()
     await dp.start_polling(bot)
