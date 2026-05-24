@@ -70,6 +70,18 @@ async def _run_health_server() -> None:
 DIVIDER_LIGHT = "· · · · · · · · · · · · · · · · · · · · · · ·"
 DIVIDER_ACCENT = "🫧 · · · · · · · · · · · · · · · · · · · 🫧"
 
+
+def build_doctor_cta_footer() -> str:
+    lines = [
+        DIVIDER_LIGHT,
+        "",
+        "💭 <i>Информация для ориентира и не является медицинской консультацией.</i>",
+        "💬 За консультацией по коже и услугам: @DrDubinsky",
+        "",
+        DIVIDER_ACCENT,
+    ]
+    return "\n".join(lines)
+
 # ─────────────────────────────────────────────────────────────
 # Тексты (UX)
 # ─────────────────────────────────────────────────────────────
@@ -85,7 +97,7 @@ START_MESSAGE = f"""Привет 🫧
 • краткое пояснение
 • кнопки: «Посмотреть состав» и «Подробнее» ✨
 
-{DIVIDER_ACCENT}"""
+{build_doctor_cta_footer()}"""
 
 HELP_MESSAGE = f"""<b>Как пользоваться</b> 🫧
 
@@ -123,7 +135,14 @@ HELP_MESSAGE = f"""<b>Как пользоваться</b> 🫧
 
 Это инструмент для информированного выбора, а не диагностика.
 
-{DIVIDER_ACCENT}"""
+{DIVIDER_LIGHT}
+
+<b>Команды</b> 🫧
+
+/about — о боте и ограничениях
+/contacts — контакты
+
+{build_doctor_cta_footer()}"""
 
 ABOUT_MESSAGE = f"""<b>О боте</b> 🤍
 
@@ -131,7 +150,7 @@ ABOUT_MESSAGE = f"""<b>О боте</b> 🤍
 
 <b>Что это</b>
 
-ComedoBot помогает ориентироваться в составе косметики и оценивать риск комедогенности.
+CreamcheckBot помогает ориентироваться в составе косметики и оценивать риск комедогенности.
 
 {DIVIDER_LIGHT}
 
@@ -144,11 +163,37 @@ ComedoBot помогает ориентироваться в составе ко
 
 {DIVIDER_LIGHT}
 
-<b>Куда за медицинскими вопросами</b> 🩵
+<b>Куда за консультацией</b> 🩵
 
-Если нужна консультация дерматолога или разбор под твою кожу — напиши в Telegram: @DrDubinsky
+По вопросам кожи, консультаций и услуг: @DrDubinsky
 
-{DIVIDER_ACCENT}"""
+{DIVIDER_LIGHT}
+
+<b>По вопросам работы бота</b> 🤍
+
+По вопросам работы бота, автоматизации и разработки сервисов: @elenaisanewleet
+
+{build_doctor_cta_footer()}"""
+
+CONTACTS_MESSAGE = f"""<b>Контакты</b> 🫧
+
+{DIVIDER_LIGHT}
+
+<b>Консультации по коже и услугам</b> 🩵
+
+Если нужен разбор под твою кожу, консультация дерматолога или запись на услуги — напиши доктору Лизе Дубинской:
+
+@DrDubinsky
+
+{DIVIDER_LIGHT}
+
+<b>Вопросы по работе бота и разработке</b> 🤍
+
+Если бот работает некорректно, не нашёл состав, выдал странный результат или есть идея по улучшению — можно написать по этому контакту.
+
+По вопросам работы бота, автоматизации и разработки сервисов: @elenaisanewleet
+
+{build_doctor_cta_footer()}"""
 
 PROCESSING_PHOTO = "🫧 Анализирую фото…"
 PROCESSING_TEXT = "🫧 Ищу состав…"
@@ -419,8 +464,8 @@ def build_step1_brief_message(data: Dict[str, Any]) -> str:
             "• проверь, чтобы текст состава был чётким и не размытым",
             "• отправь точное название (бренд + линейка + продукт)",
             "",
-            DIVIDER_ACCENT,
         ]
+        lines.append(build_doctor_cta_footer())
         return "\n".join(lines)
 
     product_name = data.get("product_name") or "Продукт"
@@ -437,8 +482,8 @@ def build_step1_brief_message(data: Dict[str, Any]) -> str:
         "",
         RISK_CONTEXT.get(risk_level, ""),
         "",
-        DIVIDER_ACCENT,
     ]
+    lines.append(build_doctor_cta_footer())
     return "\n".join(lines)
 
 
@@ -504,7 +549,7 @@ def build_composition_message(data: Dict[str, Any]) -> str:
         lines.append(f'<a href="{source_url}">Открыть страницу</a>')
 
     lines.append("")
-    lines.append(DIVIDER_ACCENT)
+    lines.append(build_doctor_cta_footer())
 
     return "\n".join(lines)
 
@@ -590,9 +635,7 @@ def build_step2_message(step2_data: Dict[str, Any], product_name: Optional[str] 
         lines.append(DIVIDER_LIGHT)
         lines.append("")
 
-    lines.append("💭 <i>Информация для ориентира, не медицинская консультация. По вопросам кожи — @DrDubinsky.</i>")
-    lines.append("")
-    lines.append(DIVIDER_ACCENT)
+    lines.append(build_doctor_cta_footer())
 
     return "\n".join(lines).strip() or "Не удалось сформировать пояснение."
 
@@ -611,6 +654,10 @@ async def handle_help(msg: Message):
 
 async def handle_about(msg: Message):
     await msg.answer(ABOUT_MESSAGE)
+
+
+async def handle_contacts(msg: Message):
+    await msg.answer(CONTACTS_MESSAGE)
 
 
 async def handle_base(msg: Message):
@@ -773,6 +820,7 @@ async def _main_async():
     dp.message.register(handle_start, CommandStart())
     dp.message.register(handle_help, Command("help"))
     dp.message.register(handle_about, Command("about"))
+    dp.message.register(handle_contacts, Command("contacts"))
     dp.message.register(handle_base, Command("base"))
 
     dp.message.register(handle_photo, F.photo)
